@@ -1,0 +1,30 @@
+// PAC file for Fiddler proxy routing
+// Host: {{PROXY_IP}}:{{PAC_PORT}}
+// Fiddler: {{PROXY_IP}}:{{FIDDLER_PORT}}
+// Generated: {{TIMESTAMP}}
+//
+// iOS: Settings > Wi-Fi > (i) > Configure Proxy > Automatic
+// URL:  http://{{PROXY_IP}}:{{PAC_PORT}}/proxy.pac
+//
+// Behavior:
+//   Fiddler running  -> traffic routes through Fiddler
+//   Fiddler stopped  -> traffic goes DIRECT (no disruption)
+
+function FindProxyForURL(url, host) {
+    // Never proxy the PAC host itself (avoids circular fetch)
+    if (host === "{{PROXY_IP}}") {
+        return "DIRECT";
+    }
+
+    // Never proxy loopback
+    if (
+        host === "localhost" ||
+        host === "127.0.0.1" ||
+        host === "::1"
+    ) {
+        return "DIRECT";
+    }
+
+    // Route through Fiddler; DIRECT fallback if Fiddler is not running
+    return "PROXY {{PROXY_IP}}:{{FIDDLER_PORT}}; DIRECT";
+}
