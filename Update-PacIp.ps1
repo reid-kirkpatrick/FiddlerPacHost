@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
-    Regenerates PAC files with the current (or specified) LAN IP address.
+    Regenerates PAC files with the current (or specified) LAN IP address
+    and restarts the watcher scheduled task.
 
 .DESCRIPTION
-    Use this after an IP change or DHCP renewal to update the PAC files
-    served by IIS without re-running the full setup.
+    Use this after an IP change or DHCP renewal. Updates the PAC files and
+    restarts the FiddlerPacWatcher task so it uses the new IP going forward.
 
 .PARAMETER FiddlerPort
     Port Fiddler listens on (default 8888).
@@ -76,5 +77,23 @@ Set-Content -Path $wpadFile -Value $pacContent -Encoding UTF8 -Force
 
 Write-Host "Updated: $pacFile"
 Write-Host "Updated: $wpadFile"
+
+# ── Restart watcher task ─────────────────────────────────────────────────────
+$taskName = 'FiddlerPacWatcher'
+$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($null -ne $task) {
+    # Update the task action with the new IP
+    $watchScript = Join-Path $scriptDir 'Watch-Fiddler.ps1'
+    $argList = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchScript`"" + `
+        " -FiddlerPort $FiddlerPort -PacPort $PacPort -SitePath `"$SitePath`" -ProxyIP `"$ProxyIP`""
+
+    Set-ScheduledTask -TaskName $taskName -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argList) | Out-Null
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Start-ScheduledTask -TaskName $taskName
+    Write-Host "Restarted scheduled task '$taskName' with new IP." -ForegroundColor Green
+} else {
+    Write-Host "Scheduled task '$taskName' not found. Run Setup-PacHost.ps1 to create it." -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "PAC URL: http://${ProxyIP}:${PacPort}/proxy.pac" -ForegroundColor Cyan

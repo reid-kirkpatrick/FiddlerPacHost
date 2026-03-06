@@ -1,0 +1,7 @@
+// PAC file — DIRECT only (Fiddler is NOT running)
+// Host: {{PROXY_IP}}:{{PAC_PORT}}
+// Generated: {{TIMESTAMP}}
+
+function FindProxyForURL(url, host) {
+    return "DIRECT";
+}

@@ -8,9 +8,11 @@
     - Generates proxy.pac and wpad.dat from the template.
     - Creates an IIS site ("PacHost") serving the PAC files.
     - Adds a Windows Firewall rule to allow inbound traffic on the PAC port.
+    - Registers a scheduled task that watches for Fiddler and swaps the PAC
+      between PROXY and DIRECT mode automatically.
 
-    Safe to re-run: skips already-enabled features and overwrites PAC files
-    with the current IP.
+    Safe to re-run: skips already-enabled features, overwrites PAC files
+    with the current IP, and re-registers the scheduled task.
 
 .PARAMETER FiddlerPort
     Port Fiddler listens on (default 8888).
@@ -50,8 +52,14 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
+# Resolve the logged-in user (not the elevated admin)
+$loggedInUser = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
+if ([string]::IsNullOrWhiteSpace($loggedInUser)) {
+    $loggedInUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+}
+
 # ── 1. Enable IIS features ──────────────────────────────────────────────────
-Write-Host "`n[1/6] Enabling IIS features..." -ForegroundColor Cyan
+Write-Host "`n[1/7] Enabling IIS features..." -ForegroundColor Cyan
 
 $features = @(
     'IIS-WebServerRole',
@@ -75,7 +83,7 @@ foreach ($feature in $features) {
 }
 
 # ── 2. Detect LAN IP ────────────────────────────────────────────────────────
-Write-Host "`n[2/6] Detecting LAN IP..." -ForegroundColor Cyan
+Write-Host "`n[2/7] Detecting LAN IP..." -ForegroundColor Cyan
 
 if ([string]::IsNullOrWhiteSpace($ProxyIP)) {
     $netConfig = Get-NetIPConfiguration |
@@ -93,7 +101,7 @@ if ([string]::IsNullOrWhiteSpace($ProxyIP)) {
 Write-Host "  Using IP: $ProxyIP" -ForegroundColor Green
 
 # ── 3. Generate PAC files ───────────────────────────────────────────────────
-Write-Host "`n[3/6] Generating PAC files..." -ForegroundColor Cyan
+Write-Host "`n[3/7] Generating PAC files..." -ForegroundColor Cyan
 
 $templatePath = Join-Path $scriptDir 'proxy.pac.template'
 if (-not (Test-Path $templatePath)) {
@@ -115,6 +123,16 @@ if (-not (Test-Path $SitePath)) {
     New-Item -ItemType Directory -Path $SitePath -Force | Out-Null
 }
 
+# Grant the logged-in user write access so the watcher can update PAC files
+if (-not [string]::IsNullOrWhiteSpace($loggedInUser)) {
+    $acl = Get-Acl $SitePath
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $loggedInUser, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $SitePath -AclObject $acl
+    Write-Host "  Granted Modify access to $loggedInUser"
+}
+
 # Write proxy.pac and wpad.dat (identical content)
 $pacFile  = Join-Path $SitePath 'proxy.pac'
 $wpadFile = Join-Path $SitePath 'wpad.dat'
@@ -132,7 +150,7 @@ Write-Host "  Written: $wpadFile"
 Write-Host "  Copied:  $webConfigDest"
 
 # ── 4. Create / update IIS site ─────────────────────────────────────────────
-Write-Host "`n[4/6] Configuring IIS site 'PacHost'..." -ForegroundColor Cyan
+Write-Host "`n[4/7] Configuring IIS site 'PacHost'..." -ForegroundColor Cyan
 
 Import-Module WebAdministration -ErrorAction Stop
 
@@ -161,7 +179,7 @@ Start-Website -Name $siteName
 Write-Host "  Site '$siteName' created and started on port $PacPort." -ForegroundColor Green
 
 # ── 5. Firewall rule ────────────────────────────────────────────────────────
-Write-Host "`n[5/6] Configuring firewall..." -ForegroundColor Cyan
+Write-Host "`n[5/7] Configuring firewall..." -ForegroundColor Cyan
 
 $fwRuleName = "PacHost (TCP-In $PacPort)"
 
@@ -180,8 +198,58 @@ if ($null -eq $existingRule) {
     Write-Host "  Firewall rule '$fwRuleName' already exists." -ForegroundColor DarkGray
 }
 
-# ── 6. Summary ──────────────────────────────────────────────────────────────
-Write-Host "`n[6/6] Setup complete!" -ForegroundColor Green
+# ── 6. Scheduled task for Fiddler watcher ────────────────────────────────────
+Write-Host "`n[6/7] Registering Fiddler watcher scheduled task..." -ForegroundColor Cyan
+
+$taskName    = 'FiddlerPacWatcher'
+$watchScript = Join-Path $scriptDir 'Watch-Fiddler.ps1'
+
+# Resolve the logged-in user (not the elevated admin) for task registration
+Write-Host "  Registering task for user: $loggedInUser"
+
+# Build the argument list, passing through the same parameters
+$argList = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchScript`"" + `
+    " -FiddlerPort $FiddlerPort -PacPort $PacPort -SitePath `"$SitePath`" -ProxyIP `"$ProxyIP`""
+
+# Remove existing task if present (idempotent)
+$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($null -ne $existingTask) {
+    Write-Host "  Removing existing '$taskName' task..."
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+}
+
+$action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argList
+$trigger = New-ScheduledTaskTrigger -AtLogon -User $loggedInUser
+$settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+$principal = New-ScheduledTaskPrincipal -UserId $loggedInUser -LogonType Interactive -RunLevel Limited
+
+Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -Principal $principal `
+    -Description 'Watches for Fiddler and swaps PAC between PROXY and DIRECT mode' | Out-Null
+
+# Start it now so the user doesn't have to log out
+Start-ScheduledTask -TaskName $taskName
+Start-Sleep -Seconds 2
+$taskInfo = Get-ScheduledTask -TaskName $taskName
+if ($taskInfo.State -eq 'Running') {
+    Write-Host "  Task '$taskName' registered and running." -ForegroundColor Green
+} else {
+    Write-Host "  Task '$taskName' registered but state is '$($taskInfo.State)'." -ForegroundColor Yellow
+    Write-Host "  Check the watcher script path and permissions. It will start at next logon." -ForegroundColor Yellow
+}
+
+# ── 7. Summary ──────────────────────────────────────────────────────────────
+Write-Host "`n[7/7] Setup complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  PAC URL:  http://${ProxyIP}:${PacPort}/proxy.pac" -ForegroundColor White
 Write-Host "  WPAD URL: http://${ProxyIP}:${PacPort}/wpad.dat"  -ForegroundColor White
@@ -195,7 +263,12 @@ Write-Host "  Fiddler:" -ForegroundColor Cyan
 Write-Host "    Ensure 'Allow remote computers to connect' is ON"
 Write-Host "    Tools > Options > Connections > port $FiddlerPort"
 Write-Host ""
+Write-Host "  Watcher:" -ForegroundColor Cyan
+Write-Host "    Scheduled task '$taskName' is running in the background."
+Write-Host "    It starts automatically at logon and restarts on failure."
+Write-Host "    Manage with: Get-ScheduledTask -TaskName '$taskName'"
+Write-Host ""
 Write-Host "  Behavior:" -ForegroundColor Cyan
-Write-Host "    Fiddler running  -> traffic proxied through ${ProxyIP}:${FiddlerPort}"
-Write-Host "    Fiddler stopped  -> traffic goes DIRECT (no disruption)"
+Write-Host "    Fiddler running  -> PAC routes through ${ProxyIP}:${FiddlerPort}"
+Write-Host "    Fiddler stopped  -> PAC returns DIRECT (no disruption)"
 Write-Host ""
