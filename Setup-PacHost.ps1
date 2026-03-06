@@ -201,15 +201,10 @@ if ($null -eq $existingRule) {
 # ── 6. Scheduled task for Fiddler watcher ────────────────────────────────────
 Write-Host "`n[6/7] Registering Fiddler watcher scheduled task..." -ForegroundColor Cyan
 
-$taskName    = 'FiddlerPacWatcher'
-$watchScript = Join-Path $scriptDir 'Watch-Fiddler.ps1'
+$taskName = 'FiddlerPacWatcher'
 
 # Resolve the logged-in user (not the elevated admin) for task registration
 Write-Host "  Registering task for user: $loggedInUser"
-
-# Build the argument list, passing through the same parameters
-$argList = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchScript`"" + `
-    " -FiddlerPort $FiddlerPort -PacPort $PacPort -SitePath `"$SitePath`" -ProxyIP `"$ProxyIP`""
 
 # Remove existing task if present (idempotent)
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -218,7 +213,11 @@ if ($null -ne $existingTask) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
-$action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argList
+# Launch via Launch-Hidden.vbs so no console window ever appears
+# (WScript.Shell.Run with window-style 0 prevents it entirely).
+$vbsPath = Join-Path $scriptDir 'Launch-Hidden.vbs'
+$watcherArgs = "-FiddlerPort $FiddlerPort -PacPort $PacPort -SitePath `"$SitePath`" -ProxyIP `"$ProxyIP`""
+$action  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbsPath`" $watcherArgs"
 $trigger = New-ScheduledTaskTrigger -AtLogon -User $loggedInUser
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `

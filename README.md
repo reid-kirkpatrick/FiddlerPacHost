@@ -87,6 +87,7 @@ FiddlerPacHost/
 ├── Uninstall-PacHost.ps1        # Removes everything setup created
 ├── Watch-Fiddler.ps1            # Process watcher: swaps PAC dynamically
 ├── Update-PacIp.ps1             # Regenerate PAC files with current IP
+├── Launch-Hidden.vbs            # VBScript launcher (runs watcher invisibly)
 ├── proxy.pac.template           # PAC template — PROXY mode
 ├── proxy-direct.pac.template    # PAC template — DIRECT-only mode
 ├── web.config                   # IIS MIME types + anti-cache headers
